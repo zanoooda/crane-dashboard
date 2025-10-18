@@ -1,3 +1,5 @@
 *.db
 *.csv
 .venv/
+
+*.pyc
