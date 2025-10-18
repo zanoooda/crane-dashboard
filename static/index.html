@@ -174,7 +174,9 @@
           }]
         },
         options: {
-          cutout: '68%',
+          circumference: 180,
+          rotation: -90,
+          cutout: '80%',
           plugins: { legend: { display: false } },
         }
       });
@@ -195,7 +197,10 @@
       $('iwod').textContent = b.idle_without_load.duration;  $('iwor').textContent = b.idle_without_load.records;
 
       const util = Math.max(0, Math.min(100, rep.daily_stats.utilization_percent || 0));
-      if(chart){ chart.data.datasets[0].data = [util, 100-util]; chart.update(); }
+      if(chart){
+        chart.data.datasets[0].data = [util, 100-util];
+        chart.update();
+      }
     }
 
     async function loadReportForSelected(){
