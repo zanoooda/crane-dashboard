@@ -1,16 +1,29 @@
 # app/main.py
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-import sqlite3
-from typing import List, Dict, Any
-from datetime import datetime
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse
+import sqlite3
+from contextlib import closing
+from typing import List, Dict, Any, Optional
+from pathlib import Path
+from datetime import datetime
 
 DB_PATH = "crane.db"
 TABLE = "events"
 
-app = FastAPI(title="Crane Dashboard API", version="1.1.0", debug=False)
+# Aliases: different column names that we consider equivalent
+FIELD_ALIASES = {
+    "datetime": ["DateTime", "datetime", "date_time", "DATETIME"],
+    "time": ["Time", "time", "TIME"],
+    "date": ["Date", "date", "DATE"],
+    "weight": ["Weight", "weight", "WEIGHT"],
+    "is_moving": ["is Moving", "isMoving", "is_moving", "Is Moving", "moving", "Moving"],
+    "is_loaded": ["is Loaded", "isLoaded", "is_loaded", "Is Loaded", "loaded", "Loaded"],
+    "state": ["State", "state", "STATE"],
+}
+
+app = FastAPI(title="Crane Dashboard API", version="1.2.0", debug=False)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/", include_in_schema=False)
@@ -29,21 +42,46 @@ app.add_middleware(
 # ----------------------
 # Utilities
 # ----------------------
-def get_db():
+def get_db() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
+    # A bit of common sense for SQLite
+    con.execute("PRAGMA foreign_keys = ON;")
     return con
 
+def have_table(con: sqlite3.Connection, table: str) -> bool:
+    row = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?;", (table,)
+    ).fetchone()
+    return row is not None
+
+def discover_columns(con: sqlite3.Connection, table: str) -> Dict[str, str]:
+    """
+    Returns a mapping of 'logical name' -> 'real name in DB' according to FIELD_ALIASES.
+    Throws a 500 error if a critical column is not in the table.
+    """
+    cols = {r["name"] for r in con.execute(f'PRAGMA table_info("{table}");')}
+    resolved: Dict[str, Optional[str]] = {}
+    for logical, candidates in FIELD_ALIASES.items():
+        found = next((c for c in candidates if c in cols), None)
+        resolved[logical] = found
+    # Required columns
+    required = ["datetime", "date", "is_moving", "is_loaded"]
+    missing = [k for k in required if not resolved[k]]
+    if missing:
+        raise HTTPException(500, f"Missing required columns in '{table}': {missing}")
+    return {k: v for k, v in resolved.items() if v}
+
+def q(name: str) -> str:
+    """Safely wraps an identifier in double quotes."""
+    return f'"{name}"'
+
 def fmt_minutes(total_seconds: float) -> str:
-    """Converts seconds → 'H:MM'."""
     m = int(round(total_seconds / 60.0))
     h, m = divmod(m, 60)
     return f"{h:01d}:{m:02d}"
 
 def to_iso_date(s: str) -> str:
-    """
-    Accepts 'YYYY-MM-DD' or 'DD/MM/YYYY' and returns ISO 'YYYY-MM-DD'.
-    """
     s = (s or "").strip()
     for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
         try:
@@ -53,9 +91,6 @@ def to_iso_date(s: str) -> str:
     raise ValueError(f"Unsupported date format: {s!r}")
 
 def parse_dt(s: str) -> datetime:
-    """
-    Understands several DateTime formats from CSV: both ISO and day-first.
-    """
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
                 "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M"):
         try:
@@ -64,108 +99,131 @@ def parse_dt(s: str) -> datetime:
             pass
     raise ValueError(f"Could not parse DateTime: {s!r}")
 
+# In SQL, we normalize "Date" to ISO: YYYY-MM-DD
+def sql_normalized_date(expr: str) -> str:
+    # If there are slashes -> DD/MM/YYYY -> assemble YYYY-MM-DD, otherwise assume it's already ISO
+    # substr(Date,7,4)||'-'||substr(Date,4,2)||'-'||substr(Date,1,2)
+    return f"""CASE
+        WHEN instr({expr}, '/') > 0
+        THEN substr({expr}, 7, 4) || '-' || substr({expr}, 4, 2) || '-' || substr({expr}, 1, 2)
+        ELSE {expr}
+      END"""
+
+def to_hhmm(dt_value: Optional[str], tm_value: Optional[str]) -> str:
+    if tm_value and len(tm_value) >= 5:
+        return tm_value[:5]
+    if dt_value:
+        try:
+            return parse_dt(dt_value).strftime("%H:%M")
+        except Exception:
+            pass
+    return "--:--"
+
 # ----------------------
 # Endpoints
 # ----------------------
 @app.get("/api/health")
 def health():
     try:
-        con = get_db()
-        con.execute("SELECT 1;").fetchone()
-        con.close()
-        return {"status": "ok"}
+        with closing(get_db()) as con:
+            con.execute("SELECT 1;").fetchone()
+            ok = have_table(con, TABLE)
+            return {"status": "ok" if ok else "degraded", "table": TABLE, "table_exists": ok}
     except Exception as e:
         return {"status": "degraded", "detail": str(e)}
 
 @app.get("/api/available-dates")
 def available_dates() -> List[str]:
     """
-    Returns unique dates in ISO YYYY-MM-DD format,
-    regardless of how they are stored in the DB (YYYY-MM-DD or DD/MM/YYYY).
+    Returns unique dates in ISO YYYY-MM-DD, regardless of the storage format.
     """
     try:
-        con = get_db()
-        rows = con.execute(
-            f'SELECT DISTINCT "Date" FROM {TABLE} WHERE "Date" IS NOT NULL;'
-        ).fetchall()
-        con.close()
+        with closing(get_db()) as con:
+            if not have_table(con, TABLE):
+                raise HTTPException(500, f"Table '{TABLE}' not found")
+            cols = discover_columns(con, TABLE)
+            date_col = q(cols["date"])
+            norm = sql_normalized_date(date_col)
+            rows = con.execute(f"SELECT DISTINCT {norm} AS d FROM {q(TABLE)} WHERE {date_col} IS NOT NULL;").fetchall()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"DB error: {e}")
 
     iso = []
     for r in rows:
         try:
-            iso.append(to_iso_date(r["Date"]))
+            iso.append(to_iso_date(r["d"]))
         except Exception:
-            # skip broken values
             continue
-
-    # sort and remove duplicates
     return sorted(set(iso))
 
 @app.get("/api/daily-report")
 def daily_report(
     date: str = Query(..., description="Date: YYYY-MM-DD (DD/MM/YYYY is also acceptable)")
 ) -> Dict[str, Any]:
-    """
-    Collects a daily report:
-      - start/end time of the day,
-      - working hours (is Moving == 1),
-      - utilization hours (is Loaded == 1),
-      - breakdown by four statuses.
-    Intervals are calculated between adjacent timestamps; Δt refers to the status of the current row.
-    """
     # 0) normalize user date to ISO
     try:
         iso = to_iso_date(date)
-        d_slash = datetime.strptime(iso, "%Y-%m-%d").strftime("%d/%m/%Y")
     except Exception as e:
         raise HTTPException(400, f"Invalid date: {e}")
 
-    # 1) read records for the day (supporting both string formats in the DB)
     try:
-        con = get_db()
-        rows = con.execute(
-            f'''
-            SELECT
-              "DateTime" as dt,
-              "Time"     as tm,
-              "Date"     as d,
-              CAST("Weight"      AS REAL)    as w,
-              CAST("is Moving"   AS INTEGER) as m,
-              CAST("is Loaded"   AS INTEGER) as l,
-              "State" as state
-            FROM {TABLE}
-            WHERE "Date" = ? OR "Date" = ?;
-            ''',
-            (iso, d_slash)
-        ).fetchall()
-        con.close()
+        with closing(get_db()) as con:
+            if not have_table(con, TABLE):
+                raise HTTPException(500, f"Table '{TABLE}' not found")
+            cols = discover_columns(con, TABLE)
+
+            dt_col = q(cols["datetime"])
+            t_col  = q(cols.get("time", ""))
+            d_col  = q(cols["date"])
+            w_col  = q(cols.get("weight", "weight"))  # may be missing - then CAST(NULL AS REAL)
+            m_col  = q(cols["is_moving"])
+            l_col  = q(cols["is_loaded"])
+            s_col  = q(cols.get("state", "state"))
+
+            norm = sql_normalized_date(d_col)
+
+            rows = con.execute(
+                f"""
+                SELECT
+                  {dt_col} AS dt,
+                  {t_col}  AS tm,
+                  {d_col}  AS d,
+                  CAST({w_col} AS REAL)           AS w,
+                  CAST({m_col} AS INTEGER)        AS m,
+                  CAST({l_col} AS INTEGER)        AS l,
+                  {s_col}   AS state
+                FROM {q(TABLE)}
+                WHERE {norm} = ? AND {dt_col} IS NOT NULL;
+                """,
+                (iso,)
+            ).fetchall()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"DB error: {e}")
 
     if not rows:
         raise HTTPException(404, f"No data for date {iso}")
 
-    # 2) sort strictly by real time
-    try:
-        rows_sorted = sorted(rows, key=lambda r: parse_dt(r["dt"]))
-    except Exception as e:
-        raise HTTPException(500, f"Time parsing/sorting: {e}")
+    # Sort by parsable real time; softly skip broken dt
+    parsed_rows = []
+    for r in rows:
+        try:
+            parsed_rows.append((parse_dt(r["dt"]), r))
+        except Exception:
+            # broken datetime -> skip the row
+            continue
 
+    if not parsed_rows:
+        raise HTTPException(404, f"No parsable timestamps for date {iso}")
+
+    parsed_rows.sort(key=lambda x: x[0])
+    rows_sorted = [r for _, r in parsed_rows]
     total_records = len(rows_sorted)
 
-    # 3) calculate intervals between neighbors and accumulate metrics
-    def to_hhmm(s_dt: str, s_tm: str) -> str:
-        # display hours/minutes from the available field
-        if s_tm and len(s_tm) >= 5:
-            return s_tm[:5]
-        try:
-            return parse_dt(s_dt).strftime("%H:%M")
-        except Exception:
-            return "--:--"
-
-    start_time = to_hhmm(rows_sorted[0]["dt"],  rows_sorted[0]["tm"])
+    start_time = to_hhmm(rows_sorted[0]["dt"], rows_sorted[0]["tm"])
     end_time   = to_hhmm(rows_sorted[-1]["dt"], rows_sorted[-1]["tm"])
 
     buckets = {
@@ -183,15 +241,16 @@ def daily_report(
         cur = rows_sorted[i]
         dt  = (dts[i + 1] - dts[i]).total_seconds()
         if dt <= 0:
-            continue  # skip garbage/duplicates/reverse steps
+            continue
 
         m = int(cur["m"] or 0)
         l = int(cur["l"] or 0)
         w = float(cur["w"] or 0.0)
 
-        buckets[(m, l)]["sec"]   += dt
-        buckets[(m, l)]["cnt"]   += 1
-        buckets[(m, l)]["w_sum"] += w
+        b = buckets[(m, l)]
+        b["sec"] += dt
+        b["cnt"] += 1
+        b["w_sum"] += w
 
         if m == 1:
             working_sec += dt
@@ -200,12 +259,14 @@ def daily_report(
 
         total_span_sec += dt
 
-    # if for some reason there are no intervals - do not divide by zero
     if total_span_sec <= 0:
-        total_span_sec = 1.0
+        total_span_sec = 1.0  # protection against division by zero
 
-    def bucket_out(m, l):
+    def bucket_out(m: int, l: int) -> Dict[str, Any]:
         b = buckets[(m, l)]
+        # Average over intervals (as you have it now).
+        # If you need a time-weighted average:
+        # avg_w = (b["w_sum"] / b["cnt"]) if b["cnt"] else 0.0
         avg_w = (b["w_sum"] / b["cnt"]) if b["cnt"] else 0.0
         return {
             "duration": fmt_minutes(b["sec"]),
@@ -213,9 +274,7 @@ def daily_report(
             "avg_weight": round(avg_w, 3),
         }
 
-    utilization_percent = int(
-        round(max(0.0, min(1.0, utilized_sec / total_span_sec)) * 100)
-    )
+    utilization_percent = int(round(max(0.0, min(1.0, utilized_sec / total_span_sec)) * 100))
 
     return {
         "date": iso,
