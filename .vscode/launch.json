@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "FastAPI (uvicorn, reload)",
+      "type": "python",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["app.main:app", "--reload", "--log-level", "debug"],
+      "env": { "PYTHONPATH": "${workspaceFolder}" },
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+
+      "subProcess": true,
+
+      "justMyCode": true
+    }
+  ]
+}
