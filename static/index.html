@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Crane Dashboard</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+  <style>
+    :root{
+      --bg:#0f1115;           /* dark theme background */
+      --panel:#161a22;        /* panels/cards */
+      --panel-2:#1c2230;      /* subtle contrast */
+      --text:#f2f4f8;         /* primary text */
+      --muted:#a9b1c3;        /* secondary text */
+      --border:rgba(255,255,255,.12);
+      --accent:#f7a700;       /* yellow/orange like in reference */
+      --accent-2:#ffd35a;
+      --danger:#ff5a5f;
+      --ok:#30d158;
+      --radius:16px;
+      --gap:14px;
+      --shadow:0 10px 30px rgba(0,0,0,.35);
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0; background:var(--bg); color:var(--text); font:16px/1.5 Inter, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+    }
+    .wrap{max-width:1100px; margin:0 auto; padding:24px;}
+    header{
+      display:flex; align-items:center; gap:16px; margin-bottom:18px;
+    }
+    .logo{width:36px; height:36px; border-radius:8px; background:linear-gradient(135deg,var(--accent),var(--accent-2)); box-shadow:var(--shadow)}
+    h1{font-size:22px; margin:0}
+
+    .toolbar{
+      display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+      padding:12px; background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
+    }
+    select, button{
+      background:var(--panel-2); color:var(--text); border:1px solid var(--border); border-radius:10px; padding:10px 12px; outline:none;
+    }
+    select:focus, button:focus{box-shadow:0 0 0 2px rgba(247,167,0,.2)}
+
+    .grid{
+      display:grid; gap:var(--gap); grid-template-columns: repeat(4,1fr);
+      margin-top:16px;
+    }
+    @media (max-width: 980px){ .grid{grid-template-columns: repeat(2,1fr);} }
+    @media (max-width: 560px){ .grid{grid-template-columns: 1fr;} }
+
+    .card{
+      background:var(--panel); border:1px solid var(--border); border-radius:var(--radius); padding:16px; box-shadow:var(--shadow);
+    }
+    .card h3{margin:0 0 4px; font-size:14px; color:var(--muted); font-weight:600; letter-spacing:.3px}
+    .value{font-size:28px; font-weight:700; letter-spacing:.4px}
+
+    .kpi{display:grid; gap:var(--gap); grid-template-columns: repeat(4,1fr);}
+    @media (max-width: 980px){ .kpi{grid-template-columns: repeat(2,1fr);} }
+    @media (max-width: 560px){ .kpi{grid-template-columns: 1fr;} }
+
+    .chart-card{display:grid; grid-template-columns: 320px 1fr; gap:var(--gap); align-items:center;}
+    @media (max-width: 980px){ .chart-card{grid-template-columns: 1fr;} }
+
+    .breakdown{
+      display:grid; gap:var(--gap); grid-template-columns: repeat(4,1fr); margin-top:var(--gap);
+    }
+    @media (max-width: 980px){ .breakdown{grid-template-columns: repeat(2,1fr);} }
+    @media (max-width: 560px){ .breakdown{grid-template-columns: 1fr;} }
+
+    .brow{display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-top:8px; color:var(--muted)}
+    .brow code{font-family:var(--mono); color:var(--text); padding:2px 6px; background:var(--panel-2); border:1px solid var(--border); border-radius:8px}
+
+    .hint{color:var(--muted); font-size:13px}
+    .footer{opacity:.7; font-size:12px; margin-top:26px; text-align:center; color:var(--muted)}
+    .pill{display:inline-block; padding:2px 8px; border:1px solid var(--border); border-radius:999px; background:var(--panel-2); font-size:12px; color:var(--muted)}
+    .ok{color:var(--ok)} .danger{color:var(--danger)}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo" aria-hidden="true"></div>
+      <div>
+        <h1>Daily Crane Report</h1>
+        <div class="hint">Vanilla JS • Dark theme • Works with your FastAPI backend</div>
+      </div>
+    </header>
+
+    <div class="toolbar">
+      <label for="dateSelect" class="hint">Select date</label>
+      <select id="dateSelect" aria-label="date"></select>
+      <span id="healthBadge" class="pill">checking…</span>
+    </div>
+
+    <section class="kpi" style="margin-top:16px">
+      <div class="card"><h3>Start Time</h3><div class="value" id="startTime">—</div></div>
+      <div class="card"><h3>End Time</h3><div class="value" id="endTime">—</div></div>
+      <div class="card"><h3>Working Hours</h3><div class="value" id="workingHours">—</div></div>
+      <div class="card"><h3>Utilized Hours</h3><div class="value" id="utilizedHours">—</div></div>
+    </section>
+
+    <section class="card chart-card" style="margin-top:var(--gap)">
+      <div>
+        <canvas id="utilizationChart" width="320" height="320"></canvas>
+      </div>
+      <div>
+        <h3>Utilization</h3>
+        <div class="value" id="utilizationPercent">—</div>
+        <div class="hint">Share of time with load during the day</div>
+        <div class="brow"><span>Total records</span><code id="totalRecords">0</code></div>
+      </div>
+    </section>
+
+    <section class="breakdown">
+      <div class="card"><h3>Moving with Load</h3><div class="value" id="mwld">—</div><div class="brow"><span>records</span><code id="mwlr">0</code></div></div>
+      <div class="card"><h3>Moving without Load</h3><div class="value" id="mwod">—</div><div class="brow"><span>records</span><code id="mwor">0</code></div></div>
+      <div class="card"><h3>Idle with Load</h3><div class="value" id="iwld">—</div><div class="brow"><span>records</span><code id="iwlr">0</code></div></div>
+      <div class="card"><h3>Idle without Load</h3><div class="value" id="iwod">—</div><div class="brow"><span>records</span><code id="iwor">0</code></div></div>
+    </section>
+
+    <div class="footer">Tip: this UI calls <code>/api/available-dates</code> and <code>/api/daily-report?date=YYYY-MM-DD</code>.
+    </div>
+  </div>
+
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    // Health badge
+    async function checkHealth(){
+      try{
+        const r = await fetch('/api/health');
+        const j = await r.json();
+        const ok = j.status === 'ok';
+        const el = $('healthBadge');
+        el.textContent = ok ? 'healthy' : 'degraded';
+        el.style.borderColor = ok ? 'rgba(48,209,88,.35)' : 'rgba(255,90,95,.4)';
+        el.style.color = ok ? 'var(--ok)' : 'var(--danger)';
+        return ok;
+      }catch{ $('healthBadge').textContent = 'offline'; return false; }
+    }
+
+    // Populate date dropdown
+    async function loadDates(){
+      const sel = $('dateSelect');
+      sel.innerHTML = '<option>Loading…</option>';
+      const r = await fetch('/api/available-dates');
+      const dates = await r.json();
+      if(!Array.isArray(dates) || !dates.length){
+        sel.innerHTML = '<option>No dates</option>';
+        return;
+      }
+      sel.innerHTML = dates.map(d => `<option value="${d}">${d}</option>`).join('');
+      sel.value = dates[0];
+    }
+
+    // Donut chart setup
+    let chart;
+    function setupChart(){
+      const ctx = $('utilizationChart');
+      chart = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: ['Utilized', 'Idle'],
+          datasets: [{
+            data: [0,100],
+            borderWidth: 0,
+            hoverOffset: 6,
+            backgroundColor: ['#f7a700', '#2a2f3b']
+          }]
+        },
+        options: {
+          cutout: '68%',
+          plugins: { legend: { display: false } },
+        }
+      });
+    }
+
+    function renderReport(rep){
+      $('startTime').textContent = rep.daily_stats.start_time;
+      $('endTime').textContent   = rep.daily_stats.end_time;
+      $('workingHours').textContent  = rep.daily_stats.working_hours;
+      $('utilizedHours').textContent = rep.daily_stats.utilized_hours;
+      $('utilizationPercent').textContent = rep.daily_stats.utilization_percent + '%';
+      $('totalRecords').textContent = rep.total_records;
+
+      const b = rep.breakdown;
+      $('mwld').textContent = b.moving_with_load.duration;   $('mwlr').textContent = b.moving_with_load.records;
+      $('mwod').textContent = b.moving_without_load.duration;$('mwor').textContent = b.moving_without_load.records;
+      $('iwld').textContent = b.idle_with_load.duration;     $('iwlr').textContent = b.idle_with_load.records;
+      $('iwod').textContent = b.idle_without_load.duration;  $('iwor').textContent = b.idle_without_load.records;
+
+      const util = Math.max(0, Math.min(100, rep.daily_stats.utilization_percent || 0));
+      if(chart){ chart.data.datasets[0].data = [util, 100-util]; chart.update(); }
+    }
+
+    async function loadReportForSelected(){
+      const d = $('dateSelect').value;
+      const url = `/api/daily-report?date=${encodeURIComponent(d)}`;
+      const r = await fetch(url);
+      if(!r.ok){
+        const text = await r.text();
+        alert(`Failed to load report for ${d}:\n${text}`);
+        return;
+      }
+      const rep = await r.json();
+      renderReport(rep);
+    }
+
+    // Init
+    (async function init(){
+      setupChart();
+      await checkHealth();
+      await loadDates();
+      await loadReportForSelected();
+      $('dateSelect').addEventListener('change', loadReportForSelected);
+    })();
+  </script>
+  <script>
+    // Fallback: if Chart is still missing (blocked by extension/CSP), load from unpkg
+    if (typeof Chart === 'undefined') {
+      const s = document.createElement('script');
+      s.src = 'https://unpkg.com/chart.js@4.4.4/dist/chart.umd.min.js';
+      document.body.appendChild(s);
+      s.onload = () => { if (typeof setupChart === 'function') { try { setupChart(); } catch(e){} } };
+    }
+  </script>
+</body>
+</html>
